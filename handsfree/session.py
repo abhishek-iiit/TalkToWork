@@ -15,6 +15,10 @@ Enhancement — send-safety guard:
 
 Enhancement — chains: once a step in an utterance has run, the steps after it don't need the
 wake word ("open Firefox and open YouTube in it"); the chain itself shows intent.
+
+Enhancement — messages: "send hi to Priya" opens Priya's chat, types and sends. Because it
+reaches another person, it needs the wake word even inside a chain, and without it nothing in
+the utterance runs.
 """
 
 import time
@@ -69,6 +73,10 @@ class Session:
         unknown = [i for i in intents if i.kind == "unknown"]
         if unknown:
             return [Result("ignored", i, "not a command; nothing typed") for i in intents]
+        # Checked up front: rejecting only the chat step would still type and send the message
+        # into whatever conversation is open.
+        if any(i.kind == "chat" for i in intents) and not (self.awake or intents[0].kind == "wake"):
+            return [Result("ignored", i, f'messages need "{self.wake_word}" first') for i in intents]
 
         results = []
         chained = False  # an earlier step of this utterance already ran
@@ -110,6 +118,10 @@ class Session:
         if intent.kind == "tab":
             ex.tab_command(intent.arg)
             return Result("done", intent)
+        if intent.kind == "chat":
+            ex.open_chat(intent.target, intent.arg)
+            self._last_typed = None  # unsent text belongs to the previous conversation
+            return Result("done", intent, f"in {intent.target}")
         if intent.kind == "type":
             text = format_dictation(intent.arg)
             if not text:

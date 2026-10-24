@@ -33,6 +33,14 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
   After you say it, it stays awake for 8 seconds. Change the phrase with `--wake-word "..."`.
 - **Chains:** `Open Firefox and open YouTube in it`, `open Slack, type hi team and send it`.
   Once the first step runs, the rest of the sentence doesn't need the wake word.
+- **Messages to a person** (Slack by default, or Discord): `Hi Abhishek, send hi to Priya`,
+  `Hi Abhishek, message Priya saying running late`, `send the notes to Priya in Discord`.
+  It opens the app, jumps to the person with Cmd+K (the switcher's top match), types and
+  sends. Messages always need the wake word, even mid-chain, so a sentence overheard in a
+  conversation never reaches anyone. Dictated text (`type … and send the notes to Priya`)
+  never starts a message.
+- If `open <app> and …` is followed by something it doesn't understand, nothing runs. It
+  no longer searches Google for the whole sentence.
 
 ## Type to it
 

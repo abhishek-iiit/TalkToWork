@@ -68,6 +68,38 @@ class GrammarTest(unittest.TestCase):
             [Intent("type", "please open the door and send it tomorrow")],
         )
 
+    def test_open_app_then_unknown_is_not_a_web_search(self):
+        self.assertEqual(
+            parse_utterance("Hi Abhishek, open Slack app and tell Super hi"),
+            [Intent("wake"), Intent("open_app", "Slack"), Intent("unknown", "tell Super hi")],
+        )
+        self.assertEqual(parse_utterance("open Slack app"), [Intent("open_app", "Slack")])
+
+    def test_message_a_person(self):
+        message = [Intent("open_app", "Slack"), Intent("chat", "Super", "Slack"), Intent("type", "hi"), Intent("send")]
+        self.assertEqual(parse_utterance("Hi Abhishek, send hi to Super."), [Intent("wake"), *message])
+        self.assertEqual(parse_utterance("Hi Abhishek, message Super saying hi"), [Intent("wake"), *message])
+        # The app just opened isn't opened twice.
+        self.assertEqual(parse_utterance("Hi Abhishek, open Slack app and send hi to Super."), [Intent("wake"), *message])
+
+    def test_message_app_and_last_to(self):
+        self.assertEqual(
+            parse_utterance("send the link to the doc to Priya in Discord"),
+            [Intent("open_app", "Discord"), Intent("chat", "Priya", "Discord"),
+             Intent("type", "the link to the doc"), Intent("send")],
+        )
+        self.assertEqual(parse_utterance("open Discord and send hi to Bob")[1], Intent("chat", "Bob", "Discord"))
+
+    def test_message_needs_a_chat_app_and_real_text(self):
+        self.assertEqual(parse_utterance("send hi to Bob in Notes")[0].kind, "unknown")
+        self.assertEqual(parse_utterance("send it to Bob")[0].kind, "unknown")
+
+    def test_dictation_never_starts_a_message(self):
+        self.assertEqual(
+            parse_utterance("type I will check and send the notes to Priya"),
+            [Intent("type", "I will check and send the notes to Priya")],
+        )
+
     def test_unrecognised_speech(self):
         self.assertEqual(parse_utterance("so anyway I told him"), [Intent("unknown", "so anyway I told him")])
 

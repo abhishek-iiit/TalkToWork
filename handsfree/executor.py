@@ -17,6 +17,7 @@ class Executor(Protocol):
     def press_enter(self) -> None: ...
     def delete_chars(self, count: int) -> None: ...
     def tab_command(self, command: str) -> None: ...
+    def open_chat(self, app: str, person: str) -> None: ...
     def frontmost_app(self) -> str | None: ...
 
 
@@ -43,6 +44,9 @@ class RecordingExecutor:
 
     def tab_command(self, command):
         self.calls.append(("tab_command", command))
+
+    def open_chat(self, app, person):
+        self.calls.append(("open_chat", f"{person} in {app}"))
 
     def frontmost_app(self):
         return self.frontmost
@@ -96,6 +100,16 @@ class MacExecutor:
     def tab_command(self, command):
         key = TAB_KEYSTROKES[command]
         _osascript(f'tell application "System Events" to keystroke "{key}" using command down')
+
+    def open_chat(self, app, person):
+        # Slack and Discord both jump to a conversation from the Cmd+K quick switcher, which
+        # picks its top match for the name.
+        _osascript('tell application "System Events" to keystroke "k" using command down')
+        time.sleep(0.5)
+        self.type_text(person)
+        time.sleep(1.2)  # let the switcher search
+        self.press_enter()
+        time.sleep(1.0)  # let the conversation load and focus its message box
 
     def frontmost_app(self):
         return _osascript(

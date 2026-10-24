@@ -26,6 +26,7 @@ APPS = {
     "vscode": "Visual Studio Code",
     "xcode": "Xcode",
     "slack": "Slack",
+    "discord": "Discord",
     "gmail": "Mail",
     "mail": "Mail",
     "notion": "Notion",
@@ -49,12 +50,18 @@ SITES = {
 
 TAB_COMMANDS = {"new chat", "new tab", "close this"}
 
+# Apps whose Cmd+K quick switcher opens a conversation by typing a person's name.
+CHAT_APPS = {"Slack", "Discord"}
+DEFAULT_CHAT_APP = "Slack"
+
 
 @dataclass(frozen=True)
 class Intent:
-    kind: str  # wake | type | send | open_app | open_site | tab | confirm | undo | unknown
+    kind: str  # wake | type | send | open_app | open_site | tab | chat | confirm | undo | unknown
     arg: str = ""
-    target: str = ""  # open_site: browser to use; "@last" means the app just opened ("in it")
+    # open_site: browser to use; "@last" means the app just opened ("in it").
+    # chat: the app to find the person (arg) in.
+    target: str = ""
 
 
 def register_installed_apps(folders: list[str] = APP_FOLDERS) -> None:
@@ -75,6 +82,14 @@ def resolve_app(spoken: str, fuzzy: bool = True) -> str | None:
     return APPS[best] if score >= 0.6 else None
 
 
+_APP_WORDS = re.compile(r"\s+(?:app|application)$", re.IGNORECASE)
+
+
+def resolve_app_name(spoken: str, fuzzy: bool = True) -> str | None:
+    """Like resolve_app, but also accepts "Slack app"."""
+    return resolve_app(_APP_WORDS.sub("", spoken.strip().rstrip(".!?")), fuzzy)
+
+
 def resolve_site(spoken: str) -> str:
     target = spoken.strip().rstrip(".!").lower().replace(" dot ", ".")
     if target in SITES:
@@ -86,9 +101,10 @@ def resolve_site(spoken: str) -> str:
 
 _IN_APP = re.compile(r"^(.*)\s(?:in|on|with|using)\s+(.+)$", re.IGNORECASE)
 _PAGE_WORDS = re.compile(r"\s+(?:url|website|web site|site|page|link)$", re.IGNORECASE)
+_HEAD_AND_REST = re.compile(r"^(.+?)(?:\s*,\s*|\s+and\s+|\s+then\s+)(.+)$", re.IGNORECASE)
 
 
-def parse_open(target: str) -> Intent:
+def parse_open(target: str) -> list[Intent]:
     """"Firefox" -> open_app; "YouTube URL in it" / "youtube in Safari" -> open_site in a browser."""
     target = target.strip().rstrip(".!?")
     browser = ""
@@ -103,10 +119,16 @@ def parse_open(target: str) -> Intent:
             target = match[1]
     target = _PAGE_WORDS.sub("", target.strip())
     if not browser:
-        app = resolve_app(target)
+        app = resolve_app_name(target)
         if app:
-            return Intent("open_app", app)
-    return Intent("open_site", resolve_site(target), browser)
+            return [Intent("open_app", app)]
+        # "open Slack app and tell Super hi": the rest wasn't a command we know. Flag it rather
+        # than searching the web for the whole sentence.
+        match = _HEAD_AND_REST.match(target)
+        app = match and resolve_app_name(match[1], fuzzy=False)
+        if app:
+            return [Intent("open_app", app), Intent("unknown", match[2])]
+    return [Intent("open_site", resolve_site(target), browser)]
 
 
 # Whisper often ends each spoken command with a full stop, so sentence ends separate steps too.
@@ -114,9 +136,11 @@ _SEP = r"(?:\s*[,.!?]\s*(?:and\s+)?(?:then\s+)?|\s+and\s+then\s+|\s+then\s+|\s+a
 # A new step starts at a separator followed by a command keyword. "send it" only counts at the
 # end of the utterance, so "type ... and send it tomorrow" stays text.
 _SPLIT = re.compile(
-    _SEP + r"(?=(?:type\b|open\b|send it[.!]?$|new chat\b|new tab\b|close this\b|scratch that[.!]?$))",
+    _SEP + r"(?=(?:type\b|open\b|send it[.!]?$|send\s.+\sto\s|message\s|text\s|new chat\b|new tab\b|close this\b"
+    r"|scratch that[.!]?$))",
     re.IGNORECASE,
 )
+_SPLIT_SEND_IT = re.compile(r"send it[.!]?$", re.IGNORECASE)
 _OPEN_TARGET = re.compile(r"open\s+(.+?)(?:\s*[,.!?]|\s+and\b|\s+then\b|$)", re.IGNORECASE)
 
 
@@ -127,32 +151,62 @@ def split_steps(utterance: str) -> list[str]:
         current, rest = text[start:match.start()], text[match.end():]
         # While dictating, "open" only starts a new step before an installed app, so
         # "type please open the door" stays one piece of text.
-        if current.strip().lower().startswith("type ") and rest.lower().startswith("open"):
+        dictating = current.strip().lower().startswith("type ")
+        if dictating and rest.lower().startswith("open"):
             target = _OPEN_TARGET.match(rest)
             if not (target and resolve_app(target[1], fuzzy=False)):
                 continue
+        # Nor does dictation ever start a message to someone: "type I'll check and send the
+        # notes to Priya" is text.
+        if dictating and re.match(r"(?:send|message|text)\s", rest, re.IGNORECASE) and not _SPLIT_SEND_IT.match(rest):
+            continue
         steps.append(current)
         start = match.end()
     steps.append(text[start:])
     return [step.strip() for step in steps if step.strip()]
 
 
-def parse_step(step: str) -> Intent:
+# "send hi to Priya", "send hi to Priya in Slack" (the last "to" names the person) and
+# "message Priya saying hi".
+_SEND_TO = re.compile(r"^send\s+(.+)\s+to\s+(.+?)(?:\s+(?:in|on)\s+(.+))?$", re.IGNORECASE)
+_MESSAGE = re.compile(r"^(?:message|text)\s+(.+?)\s+(?:saying|that)\s+(.+?)(?:\s+(?:in|on)\s+(.+))?$", re.IGNORECASE)
+
+
+def parse_message(text: str) -> list[Intent] | None:
+    """A message to a person: open their chat, type it, send it. None if it isn't one."""
+    text = text.rstrip(".!?")
+    if match := _SEND_TO.match(text):
+        message, person, where = match[1], match[2], match[3]
+    elif match := _MESSAGE.match(text):
+        person, message, where = match[1], match[2], match[3]
+    else:
+        return None
+    if message.lower() in {"it", "this", "that"}:
+        return [Intent("unknown", text)]  # forwarding something isn't supported
+    app = ""
+    if where:
+        app = resolve_app_name(where)
+        if app not in CHAT_APPS:
+            return [Intent("unknown", text)]
+    return [Intent("chat", person.strip(), app), Intent("type", message.strip()), Intent("send")]
+
+
+def parse_step(step: str) -> list[Intent]:
     text = step.strip()
     lowered = text.lower().rstrip(".!? ")
     if lowered.startswith("type "):
-        return Intent("type", text[5:].strip())
+        return [Intent("type", text[5:].strip())]
     if lowered == "send it":
-        return Intent("send")
+        return [Intent("send")]
     if lowered in {"confirm", "yes send it", "yes, send it"}:
-        return Intent("confirm")
+        return [Intent("confirm")]
     if lowered in {"scratch that", "undo that"}:
-        return Intent("undo")
+        return [Intent("undo")]
     if lowered in TAB_COMMANDS:
-        return Intent("tab", lowered)
+        return [Intent("tab", lowered)]
     if lowered.startswith("open "):
         return parse_open(text[5:])
-    return Intent("unknown", text)
+    return parse_message(text) or [Intent("unknown", text)]
 
 
 def _normalize(word: str) -> str:
@@ -188,5 +242,14 @@ def parse_utterance(utterance: str, wake_word: str = DEFAULT_WAKE_WORD) -> list[
     if rest is not None:
         intents.append(Intent("wake"))
         text = rest
-    intents.extend(parse_step(step) for step in split_steps(text))
+    for step in split_steps(text):
+        for intent in parse_step(step):
+            if intent.kind == "chat":
+                # The chat app: named in the step, else the one this utterance opened, else Slack.
+                opened = [i.arg for i in intents if i.kind == "open_app"]
+                app = intent.target or (opened[-1] if opened and opened[-1] in CHAT_APPS else DEFAULT_CHAT_APP)
+                if intents[-1:] != [Intent("open_app", app)]:
+                    intents.append(Intent("open_app", app))
+                intent = Intent("chat", intent.arg, app)
+            intents.append(intent)
     return intents

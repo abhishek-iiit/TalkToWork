@@ -104,6 +104,24 @@ class SessionTest(unittest.TestCase):
         self.statuses("type hello and send it")
         self.assertEqual(self.statuses("Hi Abhishek, scratch that"), ["done", "ignored"])
 
+    def test_message_opens_chat_types_and_sends(self):
+        self.assertEqual(self.statuses("Hi Abhishek, send hi there to Super"), ["done"] * 5)
+        self.assertEqual(
+            self.ex.calls,
+            [("open_app", "Slack"), ("open_chat", "Super in Slack"), ("type_text", "hi there"), ("press_enter", None)],
+        )
+
+    def test_message_needs_wake_word_even_in_a_chain(self):
+        self.assertEqual(self.statuses("send hi to Super"), ["ignored"] * 4)
+        self.assertEqual(self.statuses("open Slack and send hi to Super"), ["ignored"] * 4)
+        self.assertEqual(self.ex.calls, [])
+
+    def test_message_does_not_join_text_from_another_chat(self):
+        self.ex.frontmost = "Slack"
+        self.statuses("type draft for general")
+        self.statuses("Hi Abhishek, send hi to Super")
+        self.assertEqual(self.ex.calls[-2:], [("type_text", "hi"), ("press_enter", None)])
+
     def test_failed_open_stops_the_chain(self):
         def missing(app):
             raise ExecutorError(f"Unable to find application named '{app}'")
